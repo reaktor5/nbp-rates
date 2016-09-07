@@ -1,0 +1,25 @@
+{
+  "name": "nbp-rates",
+  "version": "0.0.1",
+  "description": "National Bank of Poland exchange rates node module.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reaktor5/nbp-rates.git"
+  },
+  "keywords": [
+    "NBP",
+    "currency",
+    "exchange",
+    "rates"
+  ],
+  "author": "Artur Nerkowski",
+  "license": "Unlicense",
+  "bugs": {
+    "url": "https://github.com/reaktor5/nbp-rates/issues"
+  },
+  "homepage": "https://github.com/reaktor5/nbp-rates#readme"
+}
