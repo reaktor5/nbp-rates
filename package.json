@@ -4,7 +4,7 @@
   "description": "National Bank of Poland exchange rates node module.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test.js"
   },
   "repository": {
     "type": "git",
@@ -26,6 +26,7 @@
     "bluebird": "^3.4.6",
     "iconv-lite": "^0.4.13",
     "lodash": "^4.15.0",
+    "mkdirp-bluebird": "^1.0.1",
     "moment": "^2.14.1",
     "moment-timezone": "^0.5.5",
     "request": "^2.74.0",

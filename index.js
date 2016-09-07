@@ -3,246 +3,243 @@ const Promise = require( 'bluebird' );
 const rp = require( 'request-promise' );
 const iconv = require( 'iconv-lite' );
 const moment = require( 'moment-timezone' );
+const mkdirp = require( 'mkdirp-bluebird' );
 
 const fs = require( 'fs' );
 const path = require( 'path' );
-// const xml2js = require( 'xml2js' );
-// const cheerio = require( 'cheerio' );
-// const encoding = require( 'encoding' );
 
-// xml2js.parseStringAsync = Promise.promisify( xml2js.parseString );
-Promise.promisifyAll( fs );
-
-
-var nbpXmlUri = 'http://www.nbp.pl/kursy/xml/';
-
-// var options = {
-//     uri: nbpXmlUri + 'dir.aspx?tt=A',
-//     transform: function ( body ) {
-//         return cheerio.load( body );
-//     }
-// };
-
-// rp( options )
-
-// .then( $ => {
-//     let $links = $( 'a' );
-
-//     $links.each( ( i, link ) => {
-//         let $link = $( link );
-//         console.log( $link.attr( 'href' ) );
-//         console.log( $link.text() );
-//     } );
-// } )
-
-// ;
-
-// rp( nbpXmlUri + 'dir.aspx?tt=A' )
-
-// .then( html => {
-//     let re = /href="(([abch])(\d{3})z(\d{2})(\d{2})(\d{2})\.xml)"/g;
-
-//     let match;
-
-//     list = [];
-
-//     while ( ( match = re.exec( html ) ) !== null ) {
-//         let meta = {
-//             file: match[1],
-//             tableType: match[2],
-//             tableNumber: match[3],
-//             year: match[4],
-//             month: match[5],
-//             day: match[6],
-//         };
-
-//         list.push( meta );
-//     }
-
-//     list.sort( ( a, b ) => Number( a.year + a.month + a.day ) - Number( b.year + b.month + b.day ) );
-
-//     return list[list.length - 1];
-
-// } )
-
-// .then( meta => {
-//     return rp( {
-//         uri: nbpXmlUri + meta.file,
-//         encoding: null,
-//     } );
-// } )
-
-// .then( buffer => {
-//     // return encoding.convert( xml, 'UTF-8', 'ISO-8859-2' );
-//     // return encoding.convert( xml, 'UTF-8', 'ISO-8859-2' ).toString();
-//     return iconv.decode( buffer, 'ISO-8859-2' );
-// } )
-
-// .then( xml => {
-//     console.log( xml );
-//     return xml2js.parseStringAsync( xml );
-// } )
-
-// .then( xmlDoc => {
-//     console.log( xmlDoc.tabela_kursow.pozycja.map( position => ( {
-//         name: position.nazwa_waluty[0],
-//         code: position.kod_waluty[0],
-//         quant: Number( position.przelicznik[0].replace( ',', '.' ) ),
-//         rate: Number( position.kurs_sredni[0].replace( ',', '.' ) ),
-//     } ) ) );
-// } )
-
-// ;
+const accessAsync = Promise.promisify( fs.access );
+const readFileAsync = Promise.promisify( fs.readFile );
+const writeFileAsync = Promise.promisify( fs.writeFile );
 
 let _nbpRates;
 let nbpRates;
 let _nbpRatesCache;
 let nbpRatesCache;
 
+/**
+ * ENTRY CACHE: private methods
+ */
 _nbpRatesCache = {
     cachePath: null,
-    tables: {
-        // a: {
-        //     updatedAt: null,
-        //     list: [],
-        // },
-        // b: {
-        //     updatedAt: null,
-        //     list: [],
-        // },
-        // c: {
-        //     updatedAt: null,
-        //     list: [],
-        // },
-    },
-    cachedPath: function ( table, slug ) {
-        return path.join( _nbpRatesCache.cachePath, table + '_' + slug + '.json' );
+    tables: {},
+    initPromise: null,
+
+    /**
+     * Returns a path to a cached object.
+     * @param {string} table - Table type.
+     * @param {string} name - Object name.
+     * @returns {string}
+     */
+    cachedPath: function ( table, name ) {
+        return path.join( _nbpRatesCache.cachePath, table + '_' + name + '.json' );
     },
 
+    /**
+     * Initiates cache metadata for a given table.
+     * @param {string} table - Table type.
+     * @returns {Promise}
+     */
     initEntryList: function( table ) {
-        if ( _.has( _nbpRatesCache.tables, table ) ) {
-            return Promise.resolve( true );
+
+        // if already initiated return last promise
+        if( _nbpRatesCache.initPromise ) {
+            return _nbpRatesCache.initPromise;
         }
 
+        // if no fs cache - don't try to read
         if ( _.isNil( _nbpRatesCache.cachePath ) ) {
             _nbpRatesCache.tables[table] = {
                 updatedAt: null,
                 list: [],
             };
 
-            return Promise.resolve( true );
+            _nbpRatesCache.initPromise = Promise.resolve();
+            return _nbpRatesCache.initPromise;
         }
 
-        return fs.readFileAsync( _nbpRatesCache.cachedPath( table, 'list' ), 'utf8' )
+        // make sure cache dir exists
+        _nbpRatesCache.initPromise = mkdirp( _nbpRatesCache.cachePath )
 
+        // try to read list from fs
+        .then( () => readFileAsync( _nbpRatesCache.cachedPath( table, 'list' ), 'utf8' ) )
+
+        // parse data
         .then( json => {
             _nbpRatesCache.tables[table] = JSON.parse( json );
-            return true;
         } )
 
+        // there was no file - init with empty values
         .catch( error => {
             _nbpRatesCache.tables[table] = {
                 updatedAt: null,
                 list: [],
             };
-            return true;
         } )
 
         ;
+
+        return _nbpRatesCache.initPromise;
+
     },
     
 };
 
+/**
+ * ENTRY CACHE: public methods
+ */
 nbpRatesCache = {
 
+    /**
+     * Writes an entry list to cache tagging it with a 'updatedAt' date.
+     * @param {string} table - Table type.
+     * @param {string} updatedAt - Update date to set.
+     * @param {string[]} list - Entry list to cache, always given sorted.
+     * @returns {Promise}
+     */
     cacheEntryList: function( table, updatedAt, list ) {
-        _nbpRatesCache.tables[table] = {
-            updatedAt,
-            list,
-        };
 
-        if ( _nbpRatesCache.cachePath === null ) {
-            return Promise.resolve( false );
-        }
-
-        return fs.writeFileAsync( _nbpRatesCache.cachedPath( table, 'list' ), JSON.stringify( _nbpRatesCache.tables[table] ), 'utf8' )
-
-        .then( () => true )
-
-        .catch( () => false )
-
-        ;
-
-    },
-
-    getUpdateDate: function ( table ) {
+        // make sure cache is initiated
         return _nbpRatesCache.initEntryList( table )
 
+        .then( () => {
+
+            _nbpRatesCache.tables[table] = {
+                updatedAt,
+                list,
+            };
+
+            // fs cache disabled
+            if ( _.isNil( _nbpRatesCache.cachePath ) ) {
+                return;
+            }
+
+            // write data to fs
+            return writeFileAsync( _nbpRatesCache.cachedPath( table, 'list' ), JSON.stringify( _nbpRatesCache.tables[table] ), 'utf8' );
+
+        } )
+
+        ;
+    },
+
+    /**
+     * Get the date when the cached table was last updated.
+     * @param {string} table - Table type.
+     * @returns {Promise<string|null>}
+     */
+    getUpdateDate: function ( table ) {
+
+        // make sure cache is initiated
+        return _nbpRatesCache.initEntryList( table )
+
+        // return the update date
         .then( () => _nbpRatesCache.tables[table].updatedAt )
 
         ;
     },
 
+    /**
+     * Get a last entry of a table.
+     * @param {string} table - Table type.
+     * @returns {Promise<string|null>}
+     */
     getLatestEntryDate: function ( table ) {
+
+        // make sure cache is initiated
         return _nbpRatesCache.initEntryList( table )
 
         .then( () => {
 
-            return _nbpRatesCache.tables[table].list.reduce( ( max, date ) => {
+            let entryList = _nbpRatesCache.tables[table].list;
+            let entryCount = entryList.length;
 
-                if ( max === null || date > max ) {
-                    return date;
-                }
-
-                return max;
-
-            }, null );
+            return entryCount > 0
+                 ? entryList[entryCount - 1]
+                 : null
+            ;
 
         } )
 
         ;
+
     },
 
+    /**
+     * Check if an entry was cached.
+     * @param {string} table - Table type.
+     * @param {string} date - Entry date.
+     * @returns {Promise<boolean>}
+     */
     isEntryCached: function ( table, date ) {
-        if ( _nbpRatesCache.cachePath === null ) {
+
+        if ( _.isNil( _nbpRatesCache.cachePath ) ) {
             return Promise.resolve( false );
         }
 
-        return fs.accessAsync( _nbpRatesCache.cachedPath( table, date ) )
+        return accessAsync( _nbpRatesCache.cachedPath( table, date ) )
 
         .then( () => true )
 
         .catch( () => false )
 
         ;
+
     },
 
+    /**
+     * Writes an entry to cache under a given date.
+     * @param {string} table - Table type.
+     * @param {string} date - Entry date.
+     * @param {Object} entry - Entry object.
+     * @returns {Promise}
+     */
     cacheEntry: function ( table, date, entry ) {
-        if ( _nbpRatesCache.cachePath === null ) {
-            return Promise.resolve( false );
+        
+        if ( _.isNil( _nbpRatesCache.cachePath ) ) {
+            return Promise.resolve();
         }
 
-        return fs.writeFileAsync( _nbpRatesCache.cachedPath( table, date ), JSON.stringify( entry ), 'utf8' )
+        return writeFileAsync( _nbpRatesCache.cachedPath( table, date ), JSON.stringify( entry ), 'utf8' );
 
-        .then( () => true )
-
-        .catch( () => false )
-
-        ;
     },
 
+    /**
+     * Gets an entry from cache.
+     * @param {string} table - Table type.
+     * @param {string} date - Entry date.
+     * @returns {Promise<Object>}
+     */
     getEntry: function ( table, date ) {
-        return fs.readFileAsync( _nbpRatesCache.cachedPath( table, date ), 'utf8' )
+
+        return readFileAsync( _nbpRatesCache.cachedPath( table, date ), 'utf8' )
 
         .then( json => JSON.parse( json ) )
 
         ;
+
     },
 
+    /**
+     * Gets an entry from cache.
+     * @param {string} table - Table type.
+     * @param {Object} query - Query object, containing following keys:
+     *                         {string|null} startDate - earliest valid date to use
+     *                         {string|null} endDate - latest valid date to use
+     *                         {number} limit - number of records to use
+     *                                          positive value selects earliest entries
+     *                                          zero is no limit
+     *                                          negative value selects latest entries
+     * @returns {Promise<string[]>} List of matching entry dates.
+     */
     queryEntryList: function ( table, query ) {
+
+        // make sure cache is initiated
         return _nbpRatesCache.initEntryList( table )
 
         .then( () => {
+
+            let begin = query.limit < 0 ? query.limit : 0;
+            let end = query.limit > 0 ? query.limit : undefined;
 
             return _nbpRatesCache.tables[table].list
             
@@ -250,7 +247,7 @@ nbpRatesCache = {
                 return ( query.startDate === null || query.startDate <= date ) && ( query.endDate === null || date <= query.endDate );
             } )
             
-            .slice( query.startDate === null ? -query.limit : 0, query.startDate === null ? undefined : query.limit )
+            .slice( begin, end )
 
             ;
 
@@ -262,25 +259,17 @@ nbpRatesCache = {
 
 };
 
-
-
+/**
+ * NBP_RATES: private methods
+ */
 _nbpRates = {
 
-    cachedListFile: 'table-{table}-list.json',
     listUri: 'http://www.nbp.pl/kursy/xml/dir.aspx?tt={table}',
-    // apiUri: 'http://www.nbp.pl/kursy/xml/',
     apiUri: 'http://api.nbp.pl/api/exchangerates/tables/{table}/{date}',
     timeZone: 'Europe/Warsaw',
-    updateTime: '12:00',
-    updateSlack: '00:30',
+    updateTime: '16:00',
+    updateSlack: '00:15',
     cache: nbpRatesCache,
-
-    /**
-     * Returns a cache file path for a given table
-     */
-    cachedListPath: function ( table ) {
-        return path.join( nbpRates.cache, _nbpRates.cachedListFile.replace( '{table}', table ) );
-    },
 
     /**
      * Gets latest possible entry date
@@ -290,42 +279,6 @@ _nbpRates = {
         .subtract( moment.duration( _nbpRates.updateTime ) )
         .subtract( moment.duration( _nbpRates.updateSlack ) )
         .format( 'YYYY-MM-DD' );
-    },
-
-    /**
-     * Gets latest entry a table contains
-     */
-    latestTableEntry: function ( table ) {
-
-        let max = _nbpRates.lists[table].data.reduce( ( max, filename ) => {
-
-            let date = _nbpRates.entryToDate( current );
-
-            if ( max === null || date !== null && date.diff( max.date ) > 0 ) {
-                return { filename, date, };
-            }
-
-            return max;
-
-        }, null );
-
-        return max === null ? null : max.filename;
-
-    },
-
-    /**
-     * Extracts a date of entry
-     */
-    entryToDate: function ( filename ) {
-        let re = /[abch]\d{3}z(\d{6})\.xml/;
-        let match = re.exec( filename );
-        
-        if ( match === null ) {
-            return null;
-        }
-
-        return moment.tz( match[1], 'YYMMDD', _nbpRates.timeZone )
-        .endOf( 'day' );
     },
 
     /**
@@ -478,64 +431,6 @@ _nbpRates = {
         return entry[code];
     },
 
-    // saveCachedList: function ( table, data ) {
-
-    //     if ( nbpRates.cache === null ) {
-    //         return Promise.resolve();
-    //     }
-
-    //     return Promise.try( () => {
-    //         return JSON.stringify( data );
-    //     } )
-
-    //     .then( json => fs.writeFileAsync( _nbpRates.cachedListPath( table ), json, 'utf8' ) )
-
-    //     ;
-        
-    // },
-
-    // loadCachedList: function ( table ) {
-    //     if ( nbpRates.cache === null ) {
-    //         return Promise.resolve( null );
-    //     }
-
-    //     return fs.readFileAsync( _nbpRates.cachedListPath( table ), 'utf8' )
-
-    //     .then( json => JSON.parse( json ) )
-
-    //     .catch( err => null )
-
-    //     ;
-    // },
-
-    // loadList: function ( table ) {
-
-    // },
-
-    // sortList: function( table, desc ) {
-    //     let compare = desc
-    //         ? ( a, b ) => {
-    //             let re = /[abch]\d{3}z(\d{6})\.xml/;
-    //             let matchA = a.match( re );
-    //             let matchB = b.match( re );
-
-    //             return Number( matchA[1] ) - Number( matchB[1] );
-    //         }
-    //         : ( a, b ) => {
-    //             let re = /[abch]\d{3}z(\d{6})\.xml/;
-    //             let matchA = a.match( re );
-    //             let matchB = b.match( re );
-
-    //             return Number( matchB[1] ) - Number( matchA[1] );
-    //         }
-    //     ;
-
-    //     return _nbpRates.lists[table].sort( compare );
-
-    // },
-
-    
-
     parseQuery: function( query ) {
 
         let startDate = null, endDate = null, limit = null, code;
@@ -602,13 +497,18 @@ _nbpRates = {
             }
 
             if ( _.isNil( startDate ) ) {
-                limit = 1;
+                limit = -1;
             }
         }
 
-        if ( _.isNil( startDate ) && _.isNil( endDate ) ) {
-            endDate = _nbpRates.latestPossibleEntryDate();
-            limit = 1;
+        let latestPossibleEntryDate = _nbpRates.latestPossibleEntryDate();
+
+        if ( _.isNil( endDate ) || endDate > latestPossibleEntryDate ) {
+            endDate = latestPossibleEntryDate;
+
+            if ( _.isNil( startDate ) ) {
+                limit = -1;
+            }
         }
             
         if ( _.has( query, 'limit' ) ) {
@@ -634,6 +534,9 @@ _nbpRates = {
 
 };
 
+/**
+ * NBP_RATES: public methods
+ */
 nbpRates = {
 
     setCache: function ( cache ) {
@@ -641,17 +544,15 @@ nbpRates = {
         if ( _.isString( cache ) ) {
             _nbpRatesCache.cachePath = cache;
             _nbpRates.cache = nbpRatesCache;
+        } else {
+            _nbpRates.cache = cache;
         }
-
-        _nbpRates.cache = cache;
 
     },
 
     getRates: function ( table, query ) {
 
         let q = _nbpRates.parseQuery( query );
-
-        // console.log( 'q:', q );
 
         return _nbpRates.cacheCoversDate( table, q.endDate )
 
@@ -670,159 +571,7 @@ nbpRates = {
         } )
 
     },
-
-    getTableList: function ( table ) {
-
-        _nbpRates.loadCachedList( table )
-
-        .then( list => list === null
-                     ? _nbpRates.requestList( table )
-                     : list
-        )
-
-
-
-        return rp( {
-            uri: nbpXmlUri + 'dir.aspx?tt=' + type,
-            encoding: null,
-        } )
-
-        .then( buffer => iconv.decode( buffer, 'ISO-8859-2' ) )
-
-        .then( html => {
-            let re = /href="(([abch])(\d{3})z(\d{2})(\d{2})(\d{2})\.xml)"/g;
-
-            let match;
-
-            list = [];
-
-            while ( ( match = re.exec( html ) ) !== null ) {
-                let meta = {
-                    file: match[1],
-                    tableType: match[2],
-                    tableNumber: match[3],
-                    year: match[4],
-                    month: match[5],
-                    day: match[6],
-                };
-
-                list.push( meta );
-            }
-
-            list.sort( ( a, b ) => Number( a.year + a.month + a.day ) - Number( b.year + b.month + b.day ) );
-
-            return list;
-
-        } )
-        
-        ;
-    },
-
-    getTable: function ( file ) {
-
-        return Promise.try( () => {
-
-            if ( this.cache ) {
-                // use path
-                console.log( 'trying to read' );
-                return fs.readFileAsync( this.cache + '/' + file );
-            }
-
-            console.log( 'not trying to read' );
-
-            throw new Error( 'cache disabled' );
-            // return rp( {
-            //     uri: nbpXmlUri + file,
-            //     encoding: null,
-            // } )
-
-        } )
-
-        .catch( () => {
-
-            console.log( 'trying to download' );
-
-            return rp( {
-                uri: nbpXmlUri + file,
-                encoding: null,
-            } )
-
-            .then( buffer => {
-
-                return fs.writeFileAsync( this.cache + '/' + file, buffer )
-
-                .then( () => buffer )
-
-                ;
-                
-            } )
-
-            ;
-
-        } )
-
-        .then( buffer => iconv.decode( buffer, 'ISO-8859-2' ) )
-
-        .then( xml => xml2js.parseStringAsync( xml ) )
-
-        .then( xmlDoc => xmlDoc.tabela_kursow.pozycja.map( position => ( {
-            // name: position.nazwa_waluty[0],
-            code: position.kod_waluty[0],
-            quant: Number( position.przelicznik[0].replace( ',', '.' ) ),
-            rate: Number( position.kurs_sredni[0].replace( ',', '.' ) ),
-        } ) ) )
-
-        ;
-
-    },
     
 };
-
-// module.exports.getTableList( 'a' )
-
-// .then( tableList => {
-
-//     console.log( tableList );
-
-// } )
-
-// ;
-
-
-module.exports.cache = './cache';
-// module.exports.getTable( 'a171z160905.xml' )
-
-// module.exports.getTableList( 'a' )
-
-// .then( tableList => {
-//     let last = Promise.resolve();
-
-//     tableList.forEach( tableMeta => {
-        
-//         last = last.then( () => {
-//             return module.exports.getTable( tableMeta.file );
-//         } );
-
-//     } )
-
-//     return last;
-// } )
-
-// ;
-
-// fs.readFileAsync( module.exports.cache + '/eurofxref-hist.xml' )
-
-// .then( xml => xml2js.parseStringAsync( xml ) )
-
-// .then( xmlDoc => {
-
-//     console.log( xmlDoc['gesmes:Envelope']['Cube'][0]['Cube'][0]['Cube'] );
-
-// } )
-
-// ;
-
-
-// /href="(.+)"/g
 
 module.exports = nbpRates;
